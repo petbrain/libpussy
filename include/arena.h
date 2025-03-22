@@ -27,7 +27,7 @@ void delete_arena(Arena* arena);
 
 void set_region_capacity(Arena* arena, unsigned capacity);
 /*
- * Set desired capacity of newly created regions.
+ * Set desired capacity for newly created regions.
  */
 
 void* _arena_alloc(Arena* arena, unsigned size, unsigned alignment);
@@ -38,7 +38,7 @@ void* _arena_alloc(Arena* arena, unsigned size, unsigned alignment);
  * This is a low-level function because its arguments
  * tell how to allocate a block.
  *
- * The following macro gets what to allocate:
+ * The following macro is a wrapper to allocate things of specific type:
  */
 
 #define arena_alloc(arena, num_elements, element_type) \
