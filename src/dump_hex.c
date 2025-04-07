@@ -123,7 +123,6 @@ void dump_hex(FILE* fp, unsigned indent, uint8_t* addr, unsigned size, uint8_t* 
             fputs("   ", fp);
         }
         if (with_chars) {
-            fputc(' ', fp);
             for(j = 0; j < offset; j++) {
                 fputc(' ', fp);
             }
@@ -192,7 +191,6 @@ _continue:
             fputs("   ", fp);
         }
         if (with_chars) {
-            fputc(' ', fp);
             for(j = 0; j < remainder; j++) {
                 uint8_t c = addr[j];
                 if (c < 32 || c > 127) {
