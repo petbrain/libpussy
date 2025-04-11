@@ -699,7 +699,8 @@ static bool bm_grow(BmPageHeader* bm_page, unsigned offset, unsigned old_num_uni
     unsigned increment = new_num_units - old_num_units;
     unsigned length = count_zero_bits(bm_page, offset + old_num_units, increment);
     if (length < increment) {
-        mtx_unlock(&lock);
+        TRACE("available length %u is less than increment %u; need to move\n", length, increment);
+        add_to_superblock(bm_page);
         return false;
     }
     set_bits(bm_page, offset + old_num_units, increment);
