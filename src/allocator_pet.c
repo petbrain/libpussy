@@ -547,18 +547,23 @@ static void delete_from_list(BmPageHeader* bm_page)
         bm_page->next->prev = bm_page->prev;
         bm_page->prev->next = bm_page->next;
     }
-
-#   ifdef DEBUG
-        bm_page->list = nullptr;
-#   endif
+    bm_page->list = nullptr;
 }
 
 static void grab_superblock_page(BmPageHeader* bm_page)
 {
     TRACE("taking page %p out of superblock[%u]\n", bm_page, bm_page->list - superblock);
-    mtx_lock(&lock);
-    delete_from_list(bm_page);
-    mtx_unlock(&lock);
+    for (;;) {
+        mtx_lock(&lock);
+        if (bm_page->list) {
+            delete_from_list(bm_page);
+            mtx_unlock(&lock);
+            return;
+        }
+        // page is probably in use by other thread
+        mtx_unlock(&lock);
+        thrd_yield();
+    }
 }
 
 static inline BmPageHeader* bm_page_from_addr(void* addr)
