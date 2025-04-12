@@ -256,7 +256,17 @@ typedef struct _BmPageHeader {
 } BmPageHeader;
 
 
-static BmPageHeader** superblock;
+static volatile BmPageHeader* lru_page = nullptr;
+static volatile unsigned lru_page_lfb = 0;
+/*
+ * last recently used page and its longest free block (LFB).
+ *
+ * Technically, this is a list, and functions that grab a page
+ * do not make a difference between this variable and superblock entry.
+ * However, LRU may contain single item only.
+ */
+
+static BmPageHeader* volatile* superblock;
 /*
  * Straightforward definition would be:
  *
@@ -278,7 +288,7 @@ static void dump_bm_page(BmPageHeader* bm_page)
 
 static void dump()
 {
-    BmPageHeader** list = superblock;
+    BmPageHeader** list = (BmPageHeader** /* drop volatile designator */) superblock;
     fprintf(stderr, "\nAllocator bm pages: %zu, blocks allocated %zu\n",
             num_bm_pages, stats.blocks_allocated);
     for (unsigned i = 0; i < units_per_page; i++, list++) {
@@ -496,21 +506,32 @@ static unsigned find_longest_free_block(BmPageHeader* bm_page)
 }
 
 static void add_to_superblock_entry(BmPageHeader* bm_page, unsigned lfb)
+/*
+ * Add `lru_page` to superblock and assign `bm_page` to `lru_page`.
+ */
 {
-    TRACE("adding bm_page %p to superblock[%u]\n", bm_page, lfb);
     mtx_lock(&lock);
-    BmPageHeader* first = superblock[lfb];
-    if (first) {
-        // add to the end of list
-        bm_page->prev = first->prev;
-        bm_page->next = first;
-        first->prev->next = bm_page;
-        first->prev = bm_page;
-    } else {
-        // init list
-        superblock[lfb] = bm_page->next = bm_page->prev = bm_page;
+    BmPageHeader* page = (BmPageHeader* /* drop volatile designator */) lru_page;
+    if (page) {
+        lru_page = nullptr;
+        TRACE("adding lru_page %p to superblock[%u]\n", page, lru_page_lfb);
+        BmPageHeader* first = superblock[lru_page_lfb];
+        if (first) {
+            // add to the end of list
+            page->prev = first->prev;
+            page->next = first;
+            first->prev->next = page;
+            first->prev = page;
+        } else {
+            // init list
+            superblock[lru_page_lfb] = page->next = page->prev = page;
+        }
+        page->list = (BmPageHeader** /* drop volatile designator */) &superblock[lru_page_lfb];
     }
-    bm_page->list = superblock + lfb;
+    TRACE("adding bm_page %p to LRU\n", bm_page);
+    bm_page->list = (BmPageHeader** /* drop volatile designator */) &lru_page;
+    lru_page = bm_page->next = bm_page->prev = bm_page;
+    lru_page_lfb = lfb;
     mtx_unlock(&lock);
 }
 
@@ -550,23 +571,7 @@ static void delete_from_list(BmPageHeader* bm_page)
     bm_page->list = nullptr;
 }
 
-static void grab_superblock_page(BmPageHeader* bm_page)
-{
-    TRACE("taking page %p out of superblock[%u]\n", bm_page, bm_page->list - superblock);
-    for (;;) {
-        mtx_lock(&lock);
-        if (bm_page->list) {
-            delete_from_list(bm_page);
-            mtx_unlock(&lock);
-            return;
-        }
-        // page is probably in use by other thread
-        mtx_unlock(&lock);
-        thrd_yield();
-    }
-}
-
-static inline BmPageHeader* bm_page_from_addr(void* addr)
+static inline BmPageHeader* bm_page_by_addr(void* addr)
 /*
  * Get address of the bm_page from `addr`
  */
@@ -574,6 +579,48 @@ static inline BmPageHeader* bm_page_from_addr(void* addr)
     return (BmPageHeader*) (
         ((ptrdiff_t) addr) & ~((ptrdiff_t) sys_page_size - 1)
     );
+}
+
+static void grab_superblock_page(BmPageHeader* bm_page)
+/*
+ * Prepare page for reallocation.
+ * The page is obtained by address using `bm_page_by_addr`.
+ *
+ * Take the page out of whatever list it belongs,
+ * either superblock or LRU.
+ */
+{
+#   if DEBUG
+        unsigned msg_interval = 0;
+#   endif
+
+    for (;;) {
+        mtx_lock(&lock);
+        if (bm_page->list) {
+            // the page belongs to some list
+            break;
+        }
+        // page is probably in use by other thread
+#       if DEBUG
+            if (msg_interval == 0) {
+                TRACE("waiting for page %p to be released\n", bm_page);
+                msg_interval = 1000;
+            } else {
+                msg_interval--;
+            }
+#       endif
+        mtx_unlock(&lock);
+        thrd_yield();
+    }
+#   if DEBUG
+        if (bm_page->list == (BmPageHeader** /* drop volatile designator */) &lru_page) {
+            TRACE("taking page %p out of LRU\n", bm_page);
+        } else {
+            TRACE("taking page %p out of superblock[%zu]\n", bm_page, bm_page->list - superblock);
+        }
+#   endif
+    delete_from_list(bm_page);
+    mtx_unlock(&lock);
 }
 
 static inline unsigned ptrdiff_to_units(void* addr, BmPageHeader* bm_page)
@@ -598,25 +645,38 @@ static inline unsigned ptrdiff_to_units(void* addr, BmPageHeader* bm_page)
 
 static BmPageHeader* find_available_page(unsigned num_units)
 /*
- * Search superblock lists for a free page and if found, remove it from the list
- * so that the only thread can work with it and multiple threads can work with
- * their own pages in parallel.
+ * Find available page for new allocation.
+ *
+ * First, get LRU page. If missing, search superblock lists.
+ *
+ * When found, the page is removed either form LRU or from the superblock,
+ * so the only thread continue working with it and multiple threads
+ * can work with their own pages in parallel.
  */
 {
     BmPageHeader* bm_page = nullptr;
 
     mtx_lock(&lock);
 
-    // start searching from num_units position
-    BmPageHeader** list = superblock + num_units;
-    unsigned lfb = num_units;
-    for (; lfb <= max_data_units; lfb++) {
-        bm_page = *list++;
-        if (bm_page) {
-            TRACE("taking page %p out of superblock[%u]\n", bm_page, bm_page->list - superblock);
-            delete_from_list(bm_page);
-            break;
+    if (lru_page && lru_page_lfb >= num_units) {
+        bm_page = (BmPageHeader* /* drop volatile designator */) lru_page;
+        TRACE("taking page %p out of LRU\n", bm_page);
+
+    } else {
+        // XXX optimize for speed with bitmap?
+        // start searching from num_units position
+        BmPageHeader** list = (BmPageHeader** /* drop volatile designator */) &superblock[num_units];
+        unsigned lfb = num_units;
+        for (; lfb <= max_data_units; lfb++) {
+            bm_page = *list++;
+            if (bm_page) {
+                TRACE("taking page %p out of superblock[%zu]\n", bm_page, bm_page->list - superblock);
+                break;
+            }
         }
+    }
+    if (bm_page) {
+        delete_from_list(bm_page);
     }
     mtx_unlock(&lock);
     return bm_page;
@@ -806,7 +866,7 @@ static void _release(void** addr_ptr, unsigned nbytes)
         abort();
     }
 
-    BmPageHeader* bm_page = bm_page_from_addr(addr);
+    BmPageHeader* bm_page = bm_page_by_addr(addr);
     if (addr == (void*) bm_page) {
         /*
          * addr is aligned on page boundary, this means
@@ -862,7 +922,7 @@ static bool _reallocate(void** addr_ptr, unsigned old_nbytes, unsigned new_nbyte
         goto success_same_addr;
     }
 
-    BmPageHeader* bm_page = bm_page_from_addr(addr);
+    BmPageHeader* bm_page = bm_page_by_addr(addr);
 
     // shall we shrink?
     if (new_num_units < old_num_units) {
