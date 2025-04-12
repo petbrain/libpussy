@@ -244,7 +244,7 @@ typedef struct _BmPageHeader {
     /*
      * On 4K page the header takes four 16-byte units, leaving 4032 bytes for data.
      */
-    struct _BmPageHeader** list;
+    struct _BmPageHeader** volatile list;
     struct _BmPageHeader* next;
     struct _BmPageHeader* prev;
 
@@ -256,17 +256,16 @@ typedef struct _BmPageHeader {
 } BmPageHeader;
 
 
-static volatile BmPageHeader* lru_page = nullptr;
-static volatile unsigned lru_page_lfb = 0;
+static BmPageHeader* volatile lru_page = nullptr;
 /*
- * last recently used page and its longest free block (LFB).
+ * last recently used page.
  *
  * Technically, this is a list, and functions that grab a page
  * do not make a difference between this variable and superblock entry.
  * However, LRU may contain single item only.
  */
 
-static BmPageHeader* volatile* superblock;
+static BmPageHeader** volatile superblock;
 /*
  * Straightforward definition would be:
  *
@@ -288,7 +287,7 @@ static void dump_bm_page(BmPageHeader* bm_page)
 
 static void dump()
 {
-    BmPageHeader** list = (BmPageHeader** /* drop volatile designator */) superblock;
+    BmPageHeader** list = superblock;
     fprintf(stderr, "\nAllocator bm pages: %zu, blocks allocated %zu\n",
             num_bm_pages, stats.blocks_allocated);
     for (unsigned i = 0; i < units_per_page; i++, list++) {
@@ -505,56 +504,41 @@ static unsigned find_longest_free_block(BmPageHeader* bm_page)
     return lfb;
 }
 
-static void add_to_superblock_entry(BmPageHeader* bm_page, unsigned lfb)
+static void add_to_list(BmPageHeader** list, BmPageHeader* bm_page)
 /*
- * Add `lru_page` to superblock and assign `bm_page` to `lru_page`.
+ * Add bm_page to circular doubly-linked list.
  */
 {
-    mtx_lock(&lock);
-    BmPageHeader* page = (BmPageHeader* /* drop volatile designator */) lru_page;
-    if (page) {
-        lru_page = nullptr;
-        TRACE("adding lru_page %p to superblock[%u]\n", page, lru_page_lfb);
-        BmPageHeader* first = superblock[lru_page_lfb];
-        if (first) {
-            // add to the end of list
-            page->prev = first->prev;
-            page->next = first;
-            first->prev->next = page;
-            first->prev = page;
-        } else {
-            // init list
-            superblock[lru_page_lfb] = page->next = page->prev = page;
-        }
-        page->list = (BmPageHeader** /* drop volatile designator */) &superblock[lru_page_lfb];
+    BmPageHeader* first = *list;
+    if (first) {
+        // add to the end of list
+        bm_page->prev = first->prev;
+        bm_page->next = first;
+        first->prev->next = bm_page;
+        first->prev = bm_page;
+    } else {
+        // init list
+        *list = bm_page->next = bm_page->prev = bm_page;
     }
-    TRACE("adding bm_page %p to LRU\n", bm_page);
-    bm_page->list = (BmPageHeader** /* drop volatile designator */) &lru_page;
-    lru_page = bm_page->next = bm_page->prev = bm_page;
-    lru_page_lfb = lfb;
-    mtx_unlock(&lock);
-}
-
-static inline void add_to_superblock(BmPageHeader* bm_page)
-/*
- * Add bm_page to the circular doubly-linked list.
- */
-{
-    add_to_superblock_entry(bm_page, find_longest_free_block(bm_page));
+    bm_page->list = list;
 }
 
 static void delete_from_list(BmPageHeader* bm_page)
 /*
- * Delete bm_page from the circular doubly-linked list.
+ * Delete bm_page from circular doubly-linked list.
  */
 {
     BmPageHeader** list = bm_page->list;
 
 #   ifdef DEBUG
-        TRACE("deleting page %p from superblock[%u]\n", bm_page, list - superblock);
         if (!list) {
             ERR("double call delete_from_list(%p)\n", bm_page);
             abort();
+        }
+        if (list == &lru_page) {
+            TRACE("deleting page %p from LRU\n", bm_page);
+        } else {
+            TRACE("deleting page %p from superblock[%tu]\n", bm_page, list - superblock);
         }
 #   endif
 
@@ -571,6 +555,51 @@ static void delete_from_list(BmPageHeader* bm_page)
     bm_page->list = nullptr;
 }
 
+static void add_to_superblock_entry(BmPageHeader* bm_page, unsigned lfb)
+/*
+ * Add page to superblock entry by `lfb`.
+ */
+{
+    mtx_lock(&lock);
+    TRACE("adding page %p to superblock[%tu]\n", bm_page, lfb);
+    add_to_list(&superblock[lfb], bm_page);
+    mtx_unlock(&lock);
+}
+
+static inline void unhand_page(BmPageHeader* bm_page)
+/*
+ * If `lru_page` is set, move it to superblock.
+ * Assign `bm_page` to `lru_page`.
+ */
+{
+    BmPageHeader* page_to_reclaim = nullptr;
+
+    mtx_lock(&lock);
+    if (lru_page) {
+        // have to scan while lock is held
+        unsigned lfb = find_longest_free_block(lru_page);
+
+        if (lfb < max_data_units) {
+            TRACE("adding lru_page %p to superblock[%tu]\n", lru_page, lfb);
+            add_to_list(&superblock[lfb], lru_page);
+        } else {
+            // okay to reclaim this page
+            page_to_reclaim = lru_page;
+        }
+    }
+    // now set lru_page
+    TRACE("adding bm_page %p to LRU\n", bm_page);
+    bm_page->list = (BmPageHeader** /* make compiller happy with volatile */) &lru_page;
+    lru_page = bm_page->next = bm_page->prev = bm_page;
+    mtx_unlock(&lock);
+
+    if (page_to_reclaim) {
+        TRACE("releasing page %p\n", page_to_reclaim);
+        call_munmap(page_to_reclaim, sys_page_size);
+        atomic_fetch_sub(&num_bm_pages, 1);
+    }
+}
+
 static inline BmPageHeader* bm_page_by_addr(void* addr)
 /*
  * Get address of the bm_page from `addr`
@@ -581,9 +610,10 @@ static inline BmPageHeader* bm_page_by_addr(void* addr)
     );
 }
 
-static void grab_superblock_page(BmPageHeader* bm_page)
+static void grab_page(BmPageHeader* bm_page)
 /*
- * Prepare page for reallocation.
+ * Prepare page for reallocating units
+ * in the context of current thread.
  * The page is obtained by address using `bm_page_by_addr`.
  *
  * Take the page out of whatever list it belongs,
@@ -613,10 +643,10 @@ static void grab_superblock_page(BmPageHeader* bm_page)
         thrd_yield();
     }
 #   if DEBUG
-        if (bm_page->list == (BmPageHeader** /* drop volatile designator */) &lru_page) {
+        if (bm_page->list == &lru_page) {
             TRACE("taking page %p out of LRU\n", bm_page);
         } else {
-            TRACE("taking page %p out of superblock[%zu]\n", bm_page, bm_page->list - superblock);
+            TRACE("taking page %p out of superblock[%tu]\n", bm_page, bm_page->list - superblock);
         }
 #   endif
     delete_from_list(bm_page);
@@ -643,14 +673,14 @@ static inline unsigned ptrdiff_to_units(void* addr, BmPageHeader* bm_page)
     }
 #endif
 
-static BmPageHeader* find_available_page(unsigned num_units)
+static BmPageHeader* find_available_page(unsigned num_units, unsigned* offset)
 /*
  * Find available page for new allocation.
  *
  * First, get LRU page. If missing, search superblock lists.
  *
  * When found, the page is removed either form LRU or from the superblock,
- * so the only thread continue working with it and multiple threads
+ * so only current thread continue working with it while other threads
  * can work with their own pages in parallel.
  */
 {
@@ -658,27 +688,46 @@ static BmPageHeader* find_available_page(unsigned num_units)
 
     mtx_lock(&lock);
 
-    if (lru_page && lru_page_lfb >= num_units) {
-        bm_page = (BmPageHeader* /* drop volatile designator */) lru_page;
+    if (lru_page) {
+        bm_page = lru_page;
         TRACE("taking page %p out of LRU\n", bm_page);
+        delete_from_list(bm_page);
+        mtx_unlock(&lock);
 
-    } else {
-        // XXX optimize for speed with bitmap?
-        // start searching from num_units position
-        BmPageHeader** list = (BmPageHeader** /* drop volatile designator */) &superblock[num_units];
-        unsigned lfb = num_units;
-        for (; lfb <= max_data_units; lfb++) {
-            bm_page = *list++;
-            if (bm_page) {
-                TRACE("taking page %p out of superblock[%zu]\n", bm_page, bm_page->list - superblock);
-                break;
-            }
+        // find free block on the LRU page
+        *offset = find_free_block(bm_page, num_units);
+        if (*offset) {
+            return bm_page;
+        }
+        // LRU page has no space available, move it to superblock
+        add_to_superblock_entry(bm_page, find_longest_free_block(bm_page));
+
+        // continue with superblock
+        mtx_lock(&lock);
+    }
+    // XXX optimize for speed with bitmap?
+    // start searching from num_units position
+    BmPageHeader** list = &superblock[num_units];
+    unsigned lfb = num_units;
+    for (; lfb <= max_data_units; lfb++) {
+        bm_page = *list++;
+        if (bm_page) {
+            TRACE("taking page %p out of superblock[%tu]\n", bm_page, bm_page->list - superblock);
+            delete_from_list(bm_page);
+            goto found;
         }
     }
-    if (bm_page) {
-        delete_from_list(bm_page);
-    }
     mtx_unlock(&lock);
+    return nullptr;
+
+found:
+    mtx_unlock(&lock);
+    *offset = find_free_block(bm_page, num_units);
+    if (*offset == 0) {
+        ERR("bm_page %p with LFB=%u must contain enough free space for %u units\n",
+            bm_page, bm_page->list - superblock, num_units);
+        abort();
+    }
     return bm_page;
 }
 
@@ -690,17 +739,12 @@ static void* bm_allocate(unsigned num_units, bool clean)
     TRACE("num_units %u\n", num_units);
 
     void* result = nullptr;
-    BmPageHeader* bm_page = find_available_page(num_units);
+    unsigned offset;
+    BmPageHeader* bm_page = find_available_page(num_units, &offset);
     if (bm_page) {
         // allocate
-        unsigned offset = find_free_block(bm_page, num_units);
-        if (offset == 0) {
-            ERR("bm_page %p with LFB=%u must contain enough free space for %u units\n",
-                bm_page, bm_page->list - superblock, num_units);
-            abort();
-        }
         set_bits(bm_page, offset, num_units);
-        add_to_superblock(bm_page);
+        unhand_page(bm_page);
         result = ((uint8_t*) bm_page) + offset * UNIT_SIZE;
         goto out;
     }
@@ -719,8 +763,8 @@ static void* bm_allocate(unsigned num_units, bool clean)
     // mark reserved units and allocate units
     set_bits(bm_page, 0, bm_page_header_size_in_units + num_units);
 
-    // add page to the superblock
-    add_to_superblock_entry(bm_page, max_data_units - num_units);
+    // give page away to LRU or superblock
+    unhand_page(bm_page);
 
     atomic_fetch_add(&num_bm_pages, 1);
     result = ((uint8_t*) bm_page) + bm_page_header_size_in_units * UNIT_SIZE;
@@ -742,7 +786,7 @@ static void bm_shrink(BmPageHeader* bm_page, unsigned offset, unsigned old_num_u
     TRACE("bm_page=%p, offset=%u, old_num_units=%u, new_num_units=%u\n",
           bm_page, offset, old_num_units, new_num_units);
 
-    grab_superblock_page(bm_page);
+    grab_page(bm_page);
 
     unsigned tail_units = old_num_units - new_num_units;
 
@@ -751,7 +795,7 @@ static void bm_shrink(BmPageHeader* bm_page, unsigned offset, unsigned old_num_u
 #   endif
     clear_bits(bm_page, offset + new_num_units, tail_units);
 
-    add_to_superblock(bm_page);
+    unhand_page(bm_page);
 }
 
 static bool bm_grow(BmPageHeader* bm_page, unsigned offset, unsigned old_num_units, unsigned new_num_units)
@@ -759,18 +803,18 @@ static bool bm_grow(BmPageHeader* bm_page, unsigned offset, unsigned old_num_uni
     TRACE("bm_page=%p, offset=%u, old_num_units=%u, new_num_units=%u\n",
           bm_page, offset, old_num_units, new_num_units);
 
-    grab_superblock_page(bm_page);
+    grab_page(bm_page);
 
     unsigned increment = new_num_units - old_num_units;
     unsigned length = count_zero_bits(bm_page, offset + old_num_units, increment);
     if (length < increment) {
         TRACE("available length %u is less than increment %u; need to move\n", length, increment);
-        add_to_superblock(bm_page);
+        unhand_page(bm_page);
         return false;
     }
     set_bits(bm_page, offset + old_num_units, increment);
 
-    add_to_superblock(bm_page);
+    unhand_page(bm_page);
     return true;
 }
 
@@ -778,21 +822,14 @@ static void bm_release(BmPageHeader* bm_page, unsigned offset, unsigned num_unit
 {
     TRACE("bm_page=%p, offset=%u, num_units=%u\n", bm_page, offset, num_units);
 
-    grab_superblock_page(bm_page);
+    grab_page(bm_page);
 
 #   ifdef DEBUG
         check_units_allocated(__func__, bm_page, offset, num_units);
 #   endif
     clear_bits(bm_page, offset, num_units);
 
-    unsigned lfb = find_longest_free_block(bm_page);
-    if (lfb < max_data_units) {
-        add_to_superblock_entry(bm_page, lfb);
-    } else {
-        TRACE("releasing page %p\n", bm_page);
-        call_munmap(bm_page, sys_page_size);
-        atomic_fetch_sub(&num_bm_pages, 1);
-    }
+    unhand_page(bm_page);
     atomic_fetch_sub(&stats.blocks_allocated, 1);
 }
 
