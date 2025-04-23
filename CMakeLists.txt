@@ -20,6 +20,7 @@ add_library(pussy STATIC
     src/arena.c
     src/dump_bitmap.c
     src/dump_hex.c
+    src/fsb_arena.c
     src/mmarray.c
     src/ringbuffer_base.c
     src/ringbuffer_sync.c
