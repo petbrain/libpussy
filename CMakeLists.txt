@@ -1,6 +1,6 @@
 project(libpussy)
 
-set(CMAKE_C_COMPILER clang-16)
+set(CMAKE_C_COMPILER clang)
 set(CMAKE_C_STANDARD 23)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
