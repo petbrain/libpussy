@@ -122,7 +122,7 @@ static inline void* allocate(unsigned nbytes, bool clean)
     return default_allocator.allocate(nbytes, clean);
 }
 
-static bool inline reallocate(void** addr_ptr, unsigned old_nbytes, unsigned new_nbytes, bool clean, bool* addr_changed)
+static inline bool reallocate(void** addr_ptr, unsigned old_nbytes, unsigned new_nbytes, bool clean, bool* addr_changed)
 {
     return default_allocator.reallocate(addr_ptr, old_nbytes, new_nbytes, clean, addr_changed);
 }

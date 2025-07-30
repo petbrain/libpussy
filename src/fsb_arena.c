@@ -188,7 +188,7 @@ void fsb_arena_release(void** block_ptr)
 
 static void dump_page(FsbaPageHeader* page)
 {
-    fprintf(stderr, "Page %p: %u free blocks\n", page, page->num_free);
+    fprintf(stderr, "Page %p: %u free blocks\n", (void*) page, page->num_free);
     dump_bitmap(stderr, (uint8_t*)(page->bitmap), page->arena->bitmap_size * sizeof(Word));
 }
 

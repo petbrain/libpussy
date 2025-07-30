@@ -188,15 +188,15 @@ void* _arena_fit(Arena* arena, unsigned size, unsigned alignment)
 
 void arena_print(FILE* fp, Arena* arena)
 {
-    fprintf(fp, "Arena at %p\n", arena);
-    fprintf(fp, "last region: %p\n", arena->last);
+    fprintf(fp, "Arena at %p\n", (void*) arena);
+    fprintf(fp, "last region: %p\n", (void*) arena->last);
     fprintf(fp, "new_region_capacity: %u\n", arena->new_region_capacity);
-    fprintf(fp, "first region -> next: %p\n", arena->first.next);
+    fprintf(fp, "first region -> next: %p\n", (void*) arena->first.next);
     fprintf(fp, "first region -> tail: %u\n", arena->first.tail);
     fprintf(fp, "first region -> capacity: %u\n", arena->first.capacity);
     for (Region* region = arena->first.next; region != nullptr; region = region->next) {
-        fprintf(fp, "\nRegion %p\n", region);
-        fprintf(fp, "next region: %p\n", region->next);
+        fprintf(fp, "\nRegion %p\n", (void*) region);
+        fprintf(fp, "next region: %p\n", (void*) region->next);
         fprintf(fp, "tail: %u\n", region->tail);
         fprintf(fp, "capacity: %u\n", region->capacity);
     }

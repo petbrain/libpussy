@@ -1,10 +1,10 @@
 project(libpussy)
 
-set(CMAKE_C_COMPILER clang)
+#set(CMAKE_C_COMPILER clang)
 set(CMAKE_C_STANDARD 23)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
-add_compile_options(-Wall -Wextra -pedantic -Werror -Wno-gnu -Wno-unused-parameter -Wno-format-pedantic)
+add_compile_options(-Wall -Wextra -pedantic -Werror -Wno-unused-parameter)
 
 if(DEFINED ENV{DEBUG})
     add_compile_options(-g)
