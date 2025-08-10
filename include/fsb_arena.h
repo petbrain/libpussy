@@ -25,6 +25,14 @@ void destroy_fsb_arena(FsbArena* arena);
 void* fsb_arena_allocate(FsbArena* arena);
 void fsb_arena_release(void** block_ptr);
 
+typedef void (*FsbArenaWalkCb)(FsbArena* arena, void* cb_data, void* block_ptr);
+
+void fsb_arena_walk(FsbArena* arena, FsbArenaWalkCb callback, void* cb_data);
+/*
+ * Invoke `callback` for each allocated block.
+ * The block can be released from the callback.
+ */
+
 void dump_fsb_arena(FsbArena* arena);
 
 

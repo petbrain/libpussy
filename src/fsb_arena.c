@@ -186,6 +186,40 @@ void fsb_arena_release(void** block_ptr)
     }
 }
 
+void fsb_arena_walk(FsbArena* arena, FsbArenaWalkCb callback, void* cb_data)
+{
+    if (arena->avail_pages == nullptr) {
+        return;
+    }
+    unsigned bitmap_size = arena->bitmap_size;
+    unsigned block_size = arena->block_size;
+    unsigned header_size = align_unsigned(sizeof(FsbaPageHeader) + sizeof(Word) * bitmap_size, block_size);
+    FsbaPageHeader* first_page = arena->avail_pages;
+    FsbaPageHeader* page = first_page;
+    do {
+        FsbaPageHeader* next_page = page->next;  // get next page in advance because the block can be released from callback
+        Word* bitmap = page->bitmap;
+        uint8_t* block_ptr = ((uint8_t*) page) + header_size;
+        for (unsigned i = 0; i < bitmap_size; i++) {
+            Word w = *bitmap++;
+            Word mask = 1;
+            for (unsigned j = 0; j < WORD_WIDTH; j++, mask <<= 1) {
+                unsigned num_free = page->num_free;
+                if (w & mask) {
+                    callback(arena, cb_data, (void*) block_ptr);
+                    if (num_free >= arena->blocks_per_page - 1) {
+                        // it was the last block on the page
+                        goto page_done;
+                    }
+                }
+                block_ptr += block_size;
+            }
+        }
+page_done:
+        page = next_page;
+    } while (page != first_page);
+}
+
 static void dump_page(FsbaPageHeader* page)
 {
     fprintf(stderr, "Page %p: %u free blocks\n", (void*) page, page->num_free);
