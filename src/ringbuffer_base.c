@@ -136,7 +136,7 @@ void shrink_ringbuffer(RingBuffer* ringbuf, unsigned new_size)
     }
     uint8_t* new_addr = mremap(ringbuf->data, ringbuf->size, new_size, MREMAP_MAYMOVE);
     if (new_addr == MAP_FAILED) {
-        fprintf(stderr, "%s mremap(%p, %u, %u): %s\n", __func__, ringbuf->data, ringbuf->size, new_size, strerror(errno));
+        fprintf(stderr, "%s mremap(%p, %u, %u): %s\n", __func__, (void*) ringbuf->data, ringbuf->size, new_size, strerror(errno));
         abort();
     }
     ringbuf->data = new_addr;

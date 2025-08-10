@@ -93,7 +93,7 @@ static void* _allocate(unsigned nbytes, bool clean)
 
     if (region_end <= block_end) {
         fprintf(stderr, "%s: region_end %p must be greater than block_end %p\n",
-                __func__, region_end, block_end);
+                __func__, (void*) region_end, (void*) block_end);
         exit(1);
     }
 
@@ -107,7 +107,7 @@ static void* _allocate(unsigned nbytes, bool clean)
     atomic_fetch_add(&stats.blocks_allocated, 1);
 
     if (debug_allocator.verbose) {
-        printf("%s: %u bytes -> %p\n", __func__, nbytes, block_start);
+        printf("%s: %u bytes -> %p\n", __func__, nbytes, (void*) block_start);
     }
     return block_start;
 }
